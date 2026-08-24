@@ -1,6 +1,6 @@
 [package]
 name = "reson"
-version = "0.26.0"
+version = "0.26.1"
 description = "Reson local music player"
 authors = ["Reson"]
 edition = "2021"

@@ -3214,3 +3214,9 @@ audio{display:none}.scan-toast{position:absolute;z-index:12;top:82px;left:50%;tr
 .update-source-note{display:flex;align-items:center;gap:7px;margin:0 18px 14px;color:#6f7a8d;font-size:8px}
 .update-source-note .icon{width:13px}
 @media(max-width:760px){.update-main-row{align-items:flex-start!important}.update-action-buttons{width:100%;justify-content:flex-start}.update-version-pill{display:none}}
+
+
+/* Reson v0.26.1 updater verification marker */
+.update-version-stack{margin-left:auto;display:flex;align-items:center;gap:7px}
+.update-test-badge{border:1px solid rgba(158,98,255,.15);border-radius:999px;padding:5px 8px;font-size:7px;letter-spacing:.06em;text-transform:uppercase;color:#b497df;background:rgba(151,83,255,.06)}
+@media(max-width:760px){.update-version-stack{display:none}}
