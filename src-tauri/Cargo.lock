@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "reson"
-version = "0.26.1"
+version = "0.26.3"
 dependencies = [
  "lofty",
  "reqwest 0.12.28",
