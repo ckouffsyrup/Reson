@@ -312,50 +312,45 @@ fn backend_status() -> BackendStatus {
 }
 
 #[tauri::command]
-async fn scan_music_folder(folder: String) -> Result<ScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+fn scan_music_folder(folder: String) -> Result<ScanResult, String> {
+    let root = PathBuf::from(&folder);
+    if !root.is_dir() {
+        return Err("The selected path is not a folder.".into());
+    }
 
-            let root = PathBuf::from(&folder);
-            if !root.is_dir() {
-                return Err("The selected path is not a folder.".into());
-            }
+    let artwork_cache = std::env::temp_dir().join("reson-artwork");
+    let waveform_cache = std::env::temp_dir().join("reson-waveforms");
+    let _ = fs::create_dir_all(&artwork_cache);
+    let _ = fs::create_dir_all(&waveform_cache);
 
-            let artwork_cache = std::env::temp_dir().join("reson-artwork");
-            let waveform_cache = std::env::temp_dir().join("reson-waveforms");
-            let _ = fs::create_dir_all(&artwork_cache);
-            let _ = fs::create_dir_all(&waveform_cache);
+    let mut paths = Vec::new();
+    collect_audio_files(&root, &mut paths).map_err(|e| e.to_string())?;
+    paths.sort_by_key(|p| p.to_string_lossy().to_lowercase());
 
-            let mut paths = Vec::new();
-            collect_audio_files(&root, &mut paths).map_err(|e| e.to_string())?;
-            paths.sort_by_key(|p| p.to_string_lossy().to_lowercase());
-
-            let mut tracks = Vec::new();
-            let mut skipped = 0usize;
-            for path in paths {
-                match read_track(&path, &artwork_cache) {
-                    Ok(track) => tracks.push(track),
-                    Err(_) => skipped += 1,
-                }
-            }
-
-            tracks.sort_by(|a, b| {
-                a.artist
-                    .to_lowercase()
-                    .cmp(&b.artist.to_lowercase())
-                    .then_with(|| a.album.to_lowercase().cmp(&b.album.to_lowercase()))
-                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            });
-
-            Ok(ScanResult {
-                folder: root.to_string_lossy().to_string(),
-                tracks,
-                skipped,
-            })
+    let mut tracks = Vec::new();
+    let mut skipped = 0usize;
+    for path in paths {
+        match read_track(&path, &artwork_cache, &waveform_cache) {
+            Ok(track) => tracks.push(track),
+            Err(_) => skipped += 1,
         }
+    }
+
+    tracks.sort_by(|a, b| {
+        a.artist
+            .to_lowercase()
+            .cmp(&b.artist.to_lowercase())
+            .then_with(|| a.album.to_lowercase().cmp(&b.album.to_lowercase()))
+            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+    });
+
+    Ok(ScanResult {
+        folder: root.to_string_lossy().to_string(),
+        tracks,
+        skipped,
     })
-    .await
-    .map_err(|e| format!("Library scan worker failed: {e}"))?
 }
+
 
 
 #[tauri::command]
@@ -703,7 +698,7 @@ fn is_audio_file(path: &Path) -> bool {
     )
 }
 
-fn read_track(path: &Path, artwork_cache: &Path) -> Result<Track, String> {
+fn read_track(path: &Path, artwork_cache: &Path, waveform_cache: &Path) -> Result<Track, String> {
     let tagged = Probe::open(path)
         .map_err(|e| e.to_string())?
         .read()
@@ -743,6 +738,7 @@ fn read_track(path: &Path, artwork_cache: &Path) -> Result<Track, String> {
     let tone = tones[(hash as usize) % tones.len()].to_string();
 
     let artwork_path = extract_artwork(path, tag, artwork_cache, &artist, &album);
+    let waveform = load_cached_waveform(waveform_cache, hash);
 
     Ok(Track {
         id: format!("{:x}", hash),
@@ -756,8 +752,7 @@ fn read_track(path: &Path, artwork_cache: &Path) -> Result<Track, String> {
         extension,
         tone,
         artwork_path,
-        // Waveforms are intentionally loaded on demand for the active track.
-        waveform: Vec::new(),
+        waveform,
     })
 }
 
@@ -892,6 +887,8 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(AudioEngine::default())))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(

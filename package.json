@@ -1,7 +1,7 @@
 {
   "name": "reson",
   "private": true,
-  "version": "0.25.2",
+  "version": "0.26.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,9 @@
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.0.0"
+    "@tauri-apps/plugin-opener": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@tauri-apps/plugin-process": "^2.3.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

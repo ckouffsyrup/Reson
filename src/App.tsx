@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { check } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 type View = 'home' | 'library' | 'playlists' | 'discover' | 'stats' | 'friends' | 'settings' | 'profile';
 type LibraryView = 'overview' | 'liked' | 'albums' | 'artists' | 'songs';
@@ -228,6 +230,18 @@ function App() {
   const [scanBusy, setScanBusy] = useState(false);
   const [scanMessage, setScanMessage] = useState('');
   const [lastScanMs, setLastScanMs] = useState<number|null>(()=>{const v=Number(localStorage.getItem('reson.lastScanMs'));return Number.isFinite(v)&&v>=0?v:null;});
+  const pendingUpdateRef=useRef<Awaited<ReturnType<typeof check>>>(null);
+  const [updateState,setUpdateState]=useState<{
+    checking:boolean;
+    available:boolean;
+    version:string;
+    notes:string;
+    installing:boolean;
+    progress:number|null;
+    message:string;
+    checkedAt:number|null;
+  }>({checking:false,available:false,version:'',notes:'',installing:false,progress:null,message:'',checkedAt:null});
+
   const [currentIndex, setCurrentIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -307,7 +321,7 @@ function App() {
   const [notices, setNotices] = useState<ResonNotice[]>(() => {
     try { return JSON.parse(localStorage.getItem('reson.notices') ?? '[]'); } catch { return []; }
   });
-  const [serverUrl,setServerUrl]=useState(()=>localStorage.getItem('reson.serverUrl')??'http://127.0.0.1:4782');
+  const [serverUrl,setServerUrl]=useState(()=>localStorage.getItem('reson.serverUrl')??'http://192.168.150.188:4782');
   const [socialToken,setSocialToken]=useState(()=>localStorage.getItem('reson.socialToken')??'');
   const [socialUser,setSocialUser]=useState<SocialUser|null>(null);
   const [socialFriends,setSocialFriends]=useState<SocialUser[]>([]);
@@ -385,6 +399,12 @@ function App() {
 
   useEffect(()=>localStorage.setItem('reson.lastView',active),[active]);
   useEffect(()=>localStorage.setItem('reson.lastLibraryView',libraryView),[libraryView]);
+  useEffect(()=>{
+    const saved=localStorage.getItem('reson.serverUrl');
+    if(!saved || saved==='http://127.0.0.1:4782' || saved==='http://0.0.0.0:4782'){
+      setServerUrl('http://192.168.150.188:4782');
+    }
+  },[]);
   useEffect(()=>localStorage.setItem('reson.serverUrl',serverUrl.trim().replace(/\/+$/,'')),[serverUrl]);
   useEffect(()=>{if(socialToken)localStorage.setItem('reson.socialToken',socialToken);else localStorage.removeItem('reson.socialToken');},[socialToken]);
   useEffect(() => localStorage.setItem('reson.liked', JSON.stringify(likedIds)), [likedIds]);
@@ -1225,6 +1245,65 @@ const addTrackToPlaylist = (playlistId: string, trackId: string) => {
   }, [history, tracks]);
 
 
+
+  const checkForResonUpdate=async(manual=false)=>{
+    if(updateState.checking||updateState.installing)return;
+    setUpdateState(state=>({...state,checking:true,message:manual?'Checking GitHub for a Reson update…':'',progress:null}));
+    try{
+      const update=await check({timeout:10000});
+      pendingUpdateRef.current=update;
+      if(update){
+        setUpdateState({
+          checking:false,available:true,version:update.version,notes:update.body??'',
+          installing:false,progress:null,message:`Reson ${update.version} is available.`,checkedAt:Date.now()
+        });
+      }else{
+        setUpdateState(state=>({
+          ...state,checking:false,available:false,version:'',notes:'',progress:null,
+          message:manual?'You already have the latest version of Reson.':'',checkedAt:Date.now()
+        }));
+      }
+    }catch(error){
+      pendingUpdateRef.current=null;
+      setUpdateState(state=>({
+        ...state,checking:false,available:false,progress:null,
+        message:manual?`Could not check for updates: ${String(error).replace(/^Error:\s*/,'')}`:'',
+        checkedAt:Date.now()
+      }));
+    }
+  };
+
+  const installResonUpdate=async()=>{
+    const update=pendingUpdateRef.current;
+    if(!update||updateState.installing)return;
+    let downloaded=0;
+    let total=0;
+    setUpdateState(state=>({...state,installing:true,progress:0,message:`Downloading Reson ${update.version}…`}));
+    try{
+      await update.downloadAndInstall(event=>{
+        if(event.event==='Started'){
+          total=event.data.contentLength??0;
+          downloaded=0;
+          setUpdateState(state=>({...state,progress:total?0:null,message:`Downloading Reson ${update.version}…`}));
+        }else if(event.event==='Progress'){
+          downloaded+=event.data.chunkLength;
+          setUpdateState(state=>({...state,progress:total?Math.min(100,Math.round(downloaded/total*100)):null}));
+        }else if(event.event==='Finished'){
+          setUpdateState(state=>({...state,progress:100,message:'Update installed. Restarting Reson…'}));
+        }
+      });
+      await relaunch();
+    }catch(error){
+      setUpdateState(state=>({...state,installing:false,progress:null,message:`Update failed: ${String(error).replace(/^Error:\s*/,'')}`}));
+    }
+  };
+
+  useEffect(()=>{
+    const timer=window.setTimeout(()=>void checkForResonUpdate(false),7000);
+    return ()=>window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
   const socialApi=async<T,>(path:string,options:RequestInit={}):Promise<T>=>{
     const base=serverUrl.trim().replace(/\/+$/,'');
     if(!base)throw new Error('Set a Reson Server URL first.');
@@ -1440,12 +1519,12 @@ const addTrackToPlaylist = (playlistId: string, trackId: string) => {
     }
     if (active === 'stats') return <StatsPage tracks={tracks} playCounts={playCounts} history={history} totalListenSeconds={totalListenSeconds} dailyListenSeconds={dailyListenSeconds} weeklyRecaps={weeklyRecaps} onPlay={playTrack} onContext={(e,t)=>{e.preventDefault();setContextMenu({x:e.clientX,y:e.clientY,trackId:t.id})}} />;
     if (active === 'friends') return <FriendsPage serverUrl={serverUrl} setServerUrl={setServerUrl} token={socialToken} user={socialUser} friends={socialFriends} requests={friendRequests} leaderboard={leaderboard} metric={leaderboardMetric} status={socialStatus} message={socialMessage} onLogin={socialLogin} onLogout={socialLogout} onRefresh={()=>void refreshSocial()} onRequest={sendFriendRequest} onRespond={respondFriendRequest} onMetric={setLeaderboardMetric} cloudBackupUpdatedAt={cloudBackupUpdatedAt} cloudSyncBusy={cloudSyncBusy} onBackup={()=>void backupThisDevice()} onRestore={()=>void restoreAccountBackup()} />;
-    if (active === 'settings') return <SettingsPage volume={volume} setVolume={setVolume} settings={audioSettings} setSettings={setAudioSettings} folder={folder} onChangeFolder={()=>setAddMusicOpen(true)} background={appBackground} setBackground={setAppBackground} onChooseBackground={()=>void chooseAppBackground()} diagnostics={{trackCount:tracks.length,queueSize:queueIds.length,currentWaveformSamples:current?.waveform?.length??0,lastScanMs}} />;
+    if (active === 'settings') return <SettingsPage volume={volume} setVolume={setVolume} settings={audioSettings} setSettings={setAudioSettings} folder={folder} onChangeFolder={()=>setAddMusicOpen(true)} background={appBackground} setBackground={setAppBackground} onChooseBackground={()=>void chooseAppBackground()} diagnostics={{trackCount:tracks.length,queueSize:queueIds.length,currentWaveformSamples:current?.waveform?.length??0,lastScanMs}} updater={updateState} onCheckUpdate={()=>void checkForResonUpdate(true)} onInstallUpdate={()=>void installResonUpdate()} />;
     if (active === 'profile') return <ProfilePage profileName={profileName} profilePicture={profilePicture} profileBanner={profileBanner} avatarCrop={avatarCrop} bannerCrop={bannerCrop} profileBio={profileBio} showcase={profileShowcase} tracks={tracks} playlists={playlists} playCounts={playCounts} totalListenSeconds={totalListenSeconds} likedCount={likedIds.length} current={current?.path?current:null} playing={playing} elapsedSeconds={elapsedSeconds} duration={duration} recentTracks={recentTracks} dailyListenSeconds={dailyListenSeconds} onName={setProfileName} onBio={setProfileBio} onShowcase={setProfileShowcase} onPicture={()=>void chooseProfilePicture()} onEditPicture={()=>setCropEditor({kind:'avatar',draft:{...avatarCrop}})} onRemovePicture={()=>setProfilePicture('')} onBanner={()=>void chooseProfileBanner()} onEditBanner={()=>setCropEditor({kind:'banner',draft:{...bannerCrop}})} onRemoveBanner={()=>setProfileBanner('')} onPlay={playTrack} onPlaylist={(id)=>{setActivePlaylistId(id);setActive('playlists')}} />;
     if (active === 'discover') return <DiscoverPage tracks={tracks} playCounts={playCounts} onMusicHelper={()=>void openSpotiSaver()} />;
     return <PlaylistsPage playlists={playlists} activePlaylistId={activePlaylistId} tracks={tracks} onSelect={setActivePlaylistId} onBack={()=>setActivePlaylistId(null)} onCreate={createPlaylist} onDelete={deletePlaylist} onRename={renamePlaylist} onCover={choosePlaylistCover} onClearCover={clearPlaylistCover} onMoveTrack={movePlaylistTrack} onAddTrack={addTrackToPlaylist} onRemoveTrack={removeTrackFromPlaylist} onPlay={playTrack} onPlayPlaylist={playPlaylist} playingPlaylistId={playbackContextPlaylistId} onContext={(e,t)=>{e.preventDefault();setContextMenu({x:e.clientX,y:e.clientY,trackId:t.id})}} />;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, libraryView, tracks, filteredTracks, query, folder, scanBusy, likedIds, playlists, activePlaylistId, history, playCounts, recentTracks, shuffleOn, detail, contextMenu, audioSettings, volume, profileName, profilePicture, profileBanner, profileBio, profileFavorites, profileShowcase, appBackground, totalListenSeconds, avatarCrop, bannerCrop, playing, elapsedSeconds, duration, dailyListenSeconds, socialToken, socialUser, socialFriends, friendRequests, leaderboard, leaderboardMetric, socialStatus, socialMessage, serverUrl, cloudBackupUpdatedAt, cloudSyncBusy]);
+  }, [active, libraryView, tracks, filteredTracks, query, folder, scanBusy, likedIds, playlists, activePlaylistId, history, playCounts, recentTracks, shuffleOn, detail, contextMenu, audioSettings, volume, profileName, profilePicture, profileBanner, profileBio, profileFavorites, profileShowcase, appBackground, totalListenSeconds, avatarCrop, bannerCrop, playing, elapsedSeconds, duration, dailyListenSeconds, socialToken, socialUser, socialFriends, friendRequests, leaderboard, leaderboardMetric, socialStatus, socialMessage, serverUrl, cloudBackupUpdatedAt, cloudSyncBusy, updateState]);
 
   return (
     <main className={`app-shell tone-${current?.tone ?? 'violet'} ${appBackground.mode==='custom'&&appBackground.path?'has-custom-background':''} ${appBackground.textContrast==='strong'?'text-contrast-strong':''}`}>
@@ -1479,7 +1558,7 @@ const addTrackToPlaylist = (playlistId: string, trackId: string) => {
               {noticesOpen&&<div className="reson-popover notice-popover" onMouseDown={(e)=>e.stopPropagation()} onClick={(e)=>e.stopPropagation()}><div className="popover-head"><div><span>RESON ACTIVITY</span><strong>Notices</strong></div>{notices.length>0&&<button onClick={(e)=>{e.stopPropagation();setNotices([])}}>Clear</button>}</div>{notices.length?<div className="notice-list">{notices.slice(0,12).map(n=><div className={`notice-item kind-${n.kind}`} key={n.id}><span className="notice-dot"/><div><strong>{n.title}</strong><p>{n.message}</p><small>{relativeTime(n.createdAt)}</small></div></div>)}</div>:<div className="popover-empty"><Icon name="bell"/><strong>All quiet</strong><span>Library and playback notices will appear here.</span></div>}</div>}
             </div>
             <div className="topbar-popover-wrap"><button className={`profile ${profileOpen?'active':''}`} onClick={()=>{setProfileOpen(v=>!v);setNoticesOpen(false)}}><span className="profile-avatar-small">{profilePicture?<img src={resonImageSrc(profilePicture)} alt="" style={cropImageStyle(avatarCrop)}/>:profileInitials}</span><Icon name="chevronDown"/></button>
-              {profileOpen&&<div className="reson-popover profile-popover" onMouseDown={(e)=>e.stopPropagation()} onClick={(e)=>e.stopPropagation()}><div className="profile-card"><span className="profile-avatar-large">{profilePicture?<img src={resonImageSrc(profilePicture)} alt="" style={cropImageStyle(avatarCrop)}/>:profileInitials}</span><div><strong>{profileName}</strong><small>Local Reson profile</small></div></div><div className="profile-mini-stats"><span><b>{formatListenTime(totalListenSeconds)}</b> listened</span><span><b>{likedIds.length}</b> liked</span></div><button className="profile-primary-action" onClick={(e)=>{e.stopPropagation();setProfileOpen(false);setNoticesOpen(false);setActive('profile')}}><Icon name="artist"/>View Profile</button><button onClick={(e)=>{e.stopPropagation();setProfileOpen(false);setNoticesOpen(false);setActive('profile')}}><Icon name="album"/>Customize profile</button><button onClick={()=>{setActive('stats');setProfileOpen(false)}}><Icon name="stats"/>Listening stats</button><button onClick={()=>{setActive('settings');setProfileOpen(false)}}><Icon name="settings"/>Settings</button><div className="profile-divider"/><div className="profile-about"><strong>Reson</strong><span>v0.25.2 · Local music player</span></div></div>}
+              {profileOpen&&<div className="reson-popover profile-popover" onMouseDown={(e)=>e.stopPropagation()} onClick={(e)=>e.stopPropagation()}><div className="profile-card"><span className="profile-avatar-large">{profilePicture?<img src={resonImageSrc(profilePicture)} alt="" style={cropImageStyle(avatarCrop)}/>:profileInitials}</span><div><strong>{profileName}</strong><small>Local Reson profile</small></div></div><div className="profile-mini-stats"><span><b>{formatListenTime(totalListenSeconds)}</b> listened</span><span><b>{likedIds.length}</b> liked</span></div><button className="profile-primary-action" onClick={(e)=>{e.stopPropagation();setProfileOpen(false);setNoticesOpen(false);setActive('profile')}}><Icon name="artist"/>View Profile</button><button onClick={(e)=>{e.stopPropagation();setProfileOpen(false);setNoticesOpen(false);setActive('profile')}}><Icon name="album"/>Customize profile</button><button onClick={()=>{setActive('stats');setProfileOpen(false)}}><Icon name="stats"/>Listening stats</button><button onClick={()=>{setActive('settings');setProfileOpen(false)}}><Icon name="settings"/>Settings</button><div className="profile-divider"/><div className="profile-about"><strong>Reson</strong><span>v0.26.0 · Local music player</span></div></div>}
             </div>
           </div>
         </header>
@@ -1860,9 +1939,27 @@ function ProfilePage({profileName,profilePicture,profileBanner,avatarCrop,banner
   </div>;
 }
 
-function SettingsPage({volume,setVolume,settings,setSettings,folder,onChangeFolder,background,setBackground,onChooseBackground,diagnostics}:{volume:number;setVolume:(v:number)=>void;settings:{crossfade:number;normalization:boolean;preamp:number;bass:number;mids:number;treble:number;gapless:boolean};setSettings:React.Dispatch<React.SetStateAction<{crossfade:number;normalization:boolean;preamp:number;bass:number;mids:number;treble:number;gapless:boolean}>>;folder:string;onChangeFolder:()=>void;background:AppBackgroundSettings;setBackground:React.Dispatch<React.SetStateAction<AppBackgroundSettings>>;onChooseBackground:()=>void;diagnostics:{trackCount:number;queueSize:number;currentWaveformSamples:number;lastScanMs:number|null}}) {
+function SettingsPage({volume,setVolume,settings,setSettings,folder,onChangeFolder,background,setBackground,onChooseBackground,diagnostics,updater,onCheckUpdate,onInstallUpdate}:{volume:number;setVolume:(v:number)=>void;settings:{crossfade:number;normalization:boolean;preamp:number;bass:number;mids:number;treble:number;gapless:boolean};setSettings:React.Dispatch<React.SetStateAction<{crossfade:number;normalization:boolean;preamp:number;bass:number;mids:number;treble:number;gapless:boolean}>>;folder:string;onChangeFolder:()=>void;background:AppBackgroundSettings;setBackground:React.Dispatch<React.SetStateAction<AppBackgroundSettings>>;onChooseBackground:()=>void;diagnostics:{trackCount:number;queueSize:number;currentWaveformSamples:number;lastScanMs:number|null};updater:{checking:boolean;available:boolean;version:string;notes:string;installing:boolean;progress:number|null;message:string;checkedAt:number|null};onCheckUpdate:()=>void;onInstallUpdate:()=>void}) {
   const slider=(key:'preamp'|'bass'|'mids'|'treble',label:string)=>{const value=settings[key];const pct=((value+12)/24)*100;return <div className="eq-slider"><div><strong>{label}</strong><span>{value>0?'+':''}{value} dB</span></div><input className="settings-range" type="range" min="-12" max="12" step="1" value={value} onChange={e=>setSettings(s=>({...s,[key]:Number(e.target.value)}))} style={{'--range-progress':`${pct}%`} as CSSProperties}/></div>};
   return <div className="settings-page"><div className="page-heading"><p>RESON</p><h1>Settings</h1><span>Tune playback and make Reson look and sound the way you want.</span></div>
+    <section className={`settings-card update-settings-card ${updater.available?'has-update':''}`}>
+      <div className="settings-card-head"><div><span className="settings-icon"><Icon name="refresh"/></span><div><h2>Reson Updates</h2><p>Signed updates are delivered through the official Reson GitHub releases.</p></div></div><span className="update-version-pill">v0.26.0</span></div>
+      <div className="setting-row update-main-row">
+        <div>
+          <strong>{updater.available?`Reson ${updater.version} is ready`:'Keep Reson up to date'}</strong>
+          <small>{updater.available?'Review the release notes, then install without downloading a new setup file manually.':'Reson checks automatically after startup, or you can check whenever you want.'}</small>
+        </div>
+        <div className="update-action-buttons">
+          <button className="settings-action" disabled={updater.checking||updater.installing} onClick={onCheckUpdate}>{updater.checking?'Checking…':'Check for updates'}</button>
+          {updater.available&&<button className="settings-action update-install-button" disabled={updater.installing} onClick={onInstallUpdate}>{updater.installing?(updater.progress===null?'Installing…':`Installing ${updater.progress}%`):`Install v${updater.version}`}</button>}
+        </div>
+      </div>
+      {updater.installing&&<div className="update-progress"><i style={{width:`${updater.progress??8}%`}}/></div>}
+      {updater.available&&updater.notes&&<div className="update-release-notes"><strong>WHAT'S NEW</strong><p>{updater.notes}</p></div>}
+      {updater.message&&<div className="update-status-message">{updater.message}</div>}
+      <div className="update-source-note"><Icon name="activity"/><span>Updates are verified with Reson's updater signing key before installation.</span></div>
+    </section>
+
     <section className="settings-card"><div className="settings-card-head"><div><span className="settings-icon"><Icon name="album"/></span><div><h2>Appearance</h2><p>Use Reson's atmosphere or make the app your own.</p></div></div></div>
       <div className="setting-row"><div><strong>App background</strong><small>Keep Reson Default, or place your own image behind the glass UI.</small></div><div className="background-mode-switch"><button className={background.mode==='default'?'active':''} onClick={()=>setBackground(bg=>({...bg,mode:'default'}))}>Reson Default</button><button className={background.mode==='custom'?'active':''} onClick={()=>background.path?setBackground(bg=>({...bg,mode:'custom'})):onChooseBackground()}>Custom Image</button></div></div>
       {background.mode==='custom'&&<><div className="setting-row"><div><strong>Background image</strong><small>{background.path?background.path.split(/[\\/]/).pop():'Choose a JPG, PNG or WebP image.'}</small></div><div className="background-file-actions"><button onClick={onChooseBackground}>{background.path?'Change':'Choose'} image</button>{background.path&&<button onClick={()=>setBackground(bg=>({...bg,path:'',mode:'default'}))}>Remove</button>}</div></div>
@@ -2084,7 +2181,7 @@ function FriendsPage({serverUrl,setServerUrl,token,user,friends,requests,leaderb
     return <div className="friends-page page-enter">
       <div className="page-heading"><p>RESON SOCIAL</p><h1>Friends</h1><span>Connect to your Reson Server without changing how local playback works.</span></div>
       <section className="social-login-card">
-        <div className="social-server-row"><div><strong>Server</strong><small>Your server laptop's address, including port 4782.</small></div><input value={serverUrl} onChange={e=>setServerUrl(e.target.value)} placeholder="http://192.168.1.50:4782"/></div>
+        <div className="social-server-row"><div><strong>Server</strong><small>Your server laptop's address, including port 4782.</small></div><input value={serverUrl} onChange={e=>setServerUrl(e.target.value)} placeholder="http://192.168.150.188:4782"/></div>
         <div className="social-auth-grid"><label><span>Username</span><input value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="username"/></label><label><span>Password</span><input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="8+ characters"/></label></div>
         <div className="social-auth-actions"><button className="primary" disabled={!username||password.length<8||status==='connecting'} onClick={()=>void onLogin(username,password,register)}>{status==='connecting'?'Connecting…':register?'Create account':'Sign in'}</button><button onClick={()=>setRegister(v=>!v)}>{register?'I already have an account':'Create an account'}</button></div>
         {message&&<p className="social-message">{message}</p>}
